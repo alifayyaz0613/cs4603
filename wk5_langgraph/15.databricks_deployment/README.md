@@ -1,14 +1,59 @@
-# 11. Databricks Deployment
+# 15. Databricks Deployment
 
 Deploy a LangGraph agent as a **Databricks Model Serving endpoint** — packaging the graph with MLflow and serving it via the same OpenAI-compatible API used throughout the course.
+
+## How Deployment Works
+
+Databricks Model Serving lets you host any MLflow-logged model behind a managed REST endpoint. The deployment pipeline for a LangGraph agent has four stages:
+
+1. **Define the agent (`agent.py`)**
+   The agent graph (nodes, edges, tools, LLM binding) lives in a single self-contained Python file. At the bottom of this file, `mlflow.models.set_model(graph)` declares which object MLflow should serialize. The file reads `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, and `DATABRICKS_MODEL` from environment variables — at serving time, Databricks injects these automatically via endpoint environment configuration.
+
+2. **Log to MLflow (models-from-code)**
+   Rather than pickling the graph, MLflow uses *models-from-code* logging: it stores `agent.py` as a source artifact and re-executes it at load time. The call is:
+   ```python
+   mlflow.langchain.log_model(lc_model="agent.py", name="langgraph_agent", ...)
+   ```
+   This records the model artifact, its dependencies (pip requirements), and an input/output signature in an MLflow experiment run — either locally or on a Databricks-hosted MLflow tracking server.
+
+3. **Register in Unity Catalog**
+   The logged model is promoted to a versioned entry in Unity Catalog (e.g. `main.default.cs4603_langgraph_agent`). Unity Catalog provides governance (ACLs, lineage, audit logs) and makes the model addressable by the serving layer. Registration uses:
+   ```python
+   mlflow.register_model(model_uri=model_info.model_uri, name="main.default.cs4603_langgraph_agent")
+   ```
+
+   **Why this step matters:** If you only run your agent locally (no Databricks deployment), you don't need `register_model` at all — `log_model` already saves the artifact and you can load it back with `mlflow.langchain.load_model(model_uri)` for local testing. Registration is specifically for deployment: it publishes the model into Unity Catalog's registry so that Databricks Model Serving can discover it, pull the artifact, and spin up a container to serve it. Think of `log_model` as saving a snapshot and `register_model` as publishing that snapshot to a shared catalog where the serving infrastructure can find it.
+
+4. **Create a Model Serving endpoint**
+   A serving endpoint wraps a registered model version behind an auto-scaling container. Databricks pulls the model artifact from Unity Catalog, installs its dependencies, imports `agent.py`, and exposes the graph via an **OpenAI-compatible chat completions API** (`POST /serving-endpoints/<name>/invocations`). Key settings:
+   - **Workload size:** `Small` (1 replica, suitable for dev/test)
+   - **Scale to zero:** enabled — no cost when idle, cold-starts in ~60 seconds
+   - **Environment variables:** `DATABRICKS_HOST`, `DATABRICKS_TOKEN`, `DATABRICKS_MODEL` are injected so the agent's internal LLM client can call other model-serving endpoints on the same workspace
+
+   **What happens behind the scenes when you create an endpoint:**
+
+   When you call `serving-endpoints create`, Databricks kicks off an asynchronous provisioning pipeline. This is what takes time (typically **3-8 minutes** for the first deployment):
+
+   1. **Container allocation** — Databricks provisions a container on its managed infrastructure with the requested workload size.
+   2. **Dependency installation** — The platform reads the `requirements.txt` / conda environment captured by MLflow during `log_model` and installs all Python packages (LangChain, LangGraph, OpenAI SDK, etc.) into the container.
+   3. **Model loading** — Databricks imports `agent.py` (the models-from-code artifact). This executes the file top-to-bottom: it creates the `ChatOpenAI` LLM client (using the injected environment variables), defines the tools, builds the LangGraph `StateGraph`, compiles it, and calls `mlflow.models.set_model(graph)` to register the servable object.
+   4. **Health check** — The platform verifies the model loaded successfully and the container can accept requests. If `agent.py` fails to import (e.g. missing env vars, import errors), the endpoint enters `DEPLOYMENT_FAILED` state.
+   5. **Ready** — Once healthy, the endpoint transitions to `READY` and begins accepting inference requests.
+
+   You can monitor this with `databricks serving-endpoints get <name>`. The `state.ready` field shows `NOT_READY` during provisioning and `READY` once live. The `state.config_update` field shows `IN_PROGRESS` while a deployment or update is running.
+
+   After the endpoint scales to zero (due to inactivity), the next request triggers a **cold start** that repeats steps 1-5 but takes only **60-90 seconds** since container images and packages are cached.
+
+Once live, any OpenAI-compatible client (Python `openai` SDK, `curl`, Streamlit app) can call the endpoint identically to how it calls foundation models — the agent's tool-calling loop runs server-side and returns a final assistant message.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | `agent.py` | Self-contained LangGraph CS4603 study assistant with 4 tools (calculate, temperature conversion, text analysis, course topic lookup). MLflow serializes this file directly via models-from-code. |
-| `deploy_setup.sh` | **CLI deployment script** — uses Databricks CLI for model registration and endpoint management. |
-| `deploy_setup.py` | Python deployment script — alternative to the shell script; uses the Python SDK. |
+| `deploy_setup.sh` | **CLI deployment script (bash)** — uses Databricks CLI for model registration and endpoint management. Requires Linux/macOS/WSL. |
+| `deploy_setup.ps1` | **CLI deployment script (Windows PowerShell)** — same as the bash script but runs natively in PowerShell. |
+| `deploy_setup.py` | Python deployment script — alternative to the shell/batch scripts; uses the Python SDK. |
 | `deployment.ipynb` | Interactive notebook walkthrough of the full deployment pipeline (define → log → test → register → serve → call). |
 | `streamlit_app.py` | Chat UI to talk to the deployed serving endpoint via the OpenAI-compatible API. |
 
@@ -66,12 +111,27 @@ Deploy a LangGraph agent as a **Databricks Model Serving endpoint** — packagin
 
 ## Deployment Steps
 
+Three options are provided — pick whichever suits your environment:
+
+| Option | Script | Platform | Best for |
+|--------|--------|----------|----------|
+| **A** | `deploy_setup.sh` | Linux / macOS / WSL | CLI-first workflow, CI/CD pipelines |
+| **A-win** | `deploy_setup.ps1` | Windows (native PowerShell) | Windows CLI-first workflow |
+| **B** | `deploy_setup.py` | Any (Windows, macOS, Linux) | Python-native workflow |
+| **C** | `deployment.ipynb` | Any (VS Code or Databricks) | Learning — step-by-step with explanations |
+
+All four perform the same steps (sanity-check → log → register → serve) and produce the same endpoint.
+
+---
+
 ### Option A — Shell Script (Databricks CLI)
 
-The recommended approach. Run from the **repo root**:
+The recommended approach. **Requires Linux, macOS, or WSL** — this is a bash script and will not run natively in PowerShell or Windows Command Prompt. On Windows, use WSL or Git Bash, or use Option B (Python script) instead.
+
+Run from the **repo root**:
 
 ```bash
-bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh
+bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh
 ```
 
 **What it does:**
@@ -87,12 +147,32 @@ bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh
 
 ```bash
 # Custom model name and endpoint:
-bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh \
+bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh \
     --model-name main.default.my_agent \
     --endpoint-name my-agent-endpoint
 
 # Skip endpoint creation (just log + register):
-bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh --skip-endpoint
+bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh --skip-endpoint
+```
+
+### Option A-win — PowerShell Script (Databricks CLI)
+
+Same as Option A but runs natively in Windows PowerShell — no WSL/Git Bash required. Reads credentials from `.env` automatically.
+
+Run from the **repo root**:
+
+```powershell
+.\wk5_langgraph\15.databricks_deployment\deploy_setup.ps1
+```
+
+**Options:**
+
+```powershell
+# Custom model name and endpoint:
+.\wk5_langgraph\15.databricks_deployment\deploy_setup.ps1 -ModelName main.default.my_agent -EndpointName my-agent-endpoint
+
+# Skip endpoint creation (just log + register):
+.\wk5_langgraph\15.databricks_deployment\deploy_setup.ps1 -SkipEndpoint
 ```
 
 ### Option B — Python Script
@@ -102,11 +182,11 @@ Prerequisites step 4).
 
 ```bash
 # --api-key is REQUIRED: a PAT for the target workspace's serving endpoints.
-python wk5_langgraph/11.databricks_deployment/deploy_setup.py --api-key dapi...
-python wk5_langgraph/11.databricks_deployment/deploy_setup.py --api-key dapi... --model-name my_agent --skip-endpoint
+python wk5_langgraph/15.databricks_deployment/deploy_setup.py --api-key dapi...
+python wk5_langgraph/15.databricks_deployment/deploy_setup.py --api-key dapi... --model-name my_agent --skip-endpoint
 
 # Deploy using a specific Databricks CLI profile instead of .env:
-python wk5_langgraph/11.databricks_deployment/deploy_setup.py --profile my-profile --api-key dapi...
+python wk5_langgraph/15.databricks_deployment/deploy_setup.py --profile my-profile --api-key dapi...
 ```
 
 The `--profile` flag routes both the Databricks SDK and MLflow
@@ -185,7 +265,7 @@ print(resp.choices[0].message.content)
 **Chat UI (Streamlit):**
 
 ```bash
-streamlit run wk5_langgraph/11.databricks_deployment/streamlit_app.py
+streamlit run wk5_langgraph/15.databricks_deployment/streamlit_app.py
 ```
 
 Set the host, token, and endpoint name in the sidebar (defaults are read from

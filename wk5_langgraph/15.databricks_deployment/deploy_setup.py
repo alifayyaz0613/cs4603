@@ -21,17 +21,20 @@ Prerequisites:
       databricks auth profiles          # verify it was created
 
 Usage (from repo root):
-    # --api-key is REQUIRED: a PAT for the target workspace's serving endpoints.
-    python wk5_langgraph/11.databricks_deployment/deploy_setup.py --api-key dapi...
+    # Simplest — reads DATABRICKS_TOKEN from .env automatically:
+    python wk5_langgraph/15.databricks_deployment/deploy_setup.py
 
-    # Or with custom model name:
-    python wk5_langgraph/11.databricks_deployment/deploy_setup.py --api-key dapi... --model-name my_agent
+    # Or explicitly pass a PAT (overrides .env):
+    python wk5_langgraph/15.databricks_deployment/deploy_setup.py --api-key dapi...
+
+    # With custom model name:
+    python wk5_langgraph/15.databricks_deployment/deploy_setup.py --model-name my_agent
 
     # Skip endpoint creation (just register model):
-    python wk5_langgraph/11.databricks_deployment/deploy_setup.py --api-key dapi... --skip-endpoint
+    python wk5_langgraph/15.databricks_deployment/deploy_setup.py --skip-endpoint
 
     # Authenticate with a specific Databricks CLI profile instead of .env:
-    python wk5_langgraph/11.databricks_deployment/deploy_setup.py --profile my-profile --api-key dapi...
+    python wk5_langgraph/15.databricks_deployment/deploy_setup.py --profile my-profile
 """
 
 import argparse
@@ -48,8 +51,18 @@ parser.add_argument("--model-name", default="main.default.cs4603_langgraph_agent
 parser.add_argument("--endpoint-name", default="cs4603-langgraph-agent", help="Serving endpoint name (default: cs4603-langgraph-agent)")
 parser.add_argument("--skip-endpoint", action="store_true", help="Skip creating the serving endpoint")
 parser.add_argument("--profile", default=None, help="Databricks CLI profile (~/.databrickscfg) to deploy with. Overrides DATABRICKS_HOST/TOKEN from .env for this run; .env is still used to run the notebooks.")
-parser.add_argument("--api-key", required=True, help="Databricks personal access token (PAT) for the TARGET workspace's model serving endpoints. Required because a profile using OAuth login has no static token for the agent's LLM client to use.")
+parser.add_argument("--api-key", default=None, help="Databricks personal access token (PAT) for the TARGET workspace's model serving endpoints. If not provided, falls back to DATABRICKS_TOKEN from .env.")
 args = parser.parse_args()
+
+# Resolve API key: explicit flag > .env
+if args.api_key is None:
+    from dotenv import load_dotenv
+    load_dotenv()
+    args.api_key = os.environ.get("DATABRICKS_TOKEN")
+    if not args.api_key:
+        print("Error: --api-key not provided and DATABRICKS_TOKEN not found in .env")
+        sys.exit(1)
+    print("  (Using DATABRICKS_TOKEN from .env as --api-key)")
 
 MODEL_REGISTRY_NAME = args.model_name
 
@@ -284,6 +297,11 @@ else:
                             entity_version=str(model_version),
                             workload_size="Small",
                             scale_to_zero_enabled=True,
+                            environment_vars={
+                                "DATABRICKS_HOST": DATABRICKS_HOST,
+                                "DATABRICKS_TOKEN": DATABRICKS_TOKEN,
+                                "DATABRICKS_MODEL": DATABRICKS_MODEL,
+                            },
                         )
                     ],
                 )
@@ -299,6 +317,11 @@ else:
                                 entity_version=str(model_version),
                                 workload_size="Small",
                                 scale_to_zero_enabled=True,
+                                environment_vars={
+                                    "DATABRICKS_HOST": DATABRICKS_HOST,
+                                    "DATABRICKS_TOKEN": DATABRICKS_TOKEN,
+                                    "DATABRICKS_MODEL": DATABRICKS_MODEL,
+                                },
                             )
                         ]
                     ),

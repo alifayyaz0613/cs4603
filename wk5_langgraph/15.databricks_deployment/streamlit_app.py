@@ -13,7 +13,7 @@ Prerequisites:
     endpoint name of the workspace where the endpoint lives.
 
 Run (from repo root, with the venv active):
-    streamlit run wk5_langgraph/11.databricks_deployment/streamlit_app.py
+    streamlit run wk5_langgraph/15.databricks_deployment/streamlit_app.py
 """
 
 import os

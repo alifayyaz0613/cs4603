@@ -18,18 +18,18 @@
 #
 # Usage (from repo root):
 #   # --api-key is REQUIRED: a PAT for the target workspace's serving endpoints.
-#   bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh --api-key dapi...
+#   bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh --api-key dapi...
 #
 #   # Custom model name / endpoint:
-#   bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh --api-key dapi... \
+#   bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh --api-key dapi... \
 #       --model-name main.default.my_agent \
 #       --endpoint-name my-agent-endpoint
 #
 #   # Skip endpoint creation (just log + register):
-#   bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh --api-key dapi... --skip-endpoint
+#   bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh --api-key dapi... --skip-endpoint
 #
 #   # Deploy to a specific workspace via a Databricks CLI profile:
-#   bash wk5_langgraph/11.databricks_deployment/deploy_setup.sh --profile my-profile --api-key dapi...
+#   bash wk5_langgraph/15.databricks_deployment/deploy_setup.sh --profile my-profile --api-key dapi...
 # ─────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -192,7 +192,12 @@ else
     "entity_name": "${MODEL_NAME}",
     "entity_version": "${MODEL_VERSION}",
     "workload_size": "Small",
-    "scale_to_zero_enabled": true
+    "scale_to_zero_enabled": true,
+    "environment_vars": {
+        "DATABRICKS_HOST": "${DATABRICKS_HOST}",
+        "DATABRICKS_TOKEN": "${API_KEY}",
+        "DATABRICKS_MODEL": "${DATABRICKS_MODEL}"
+    }
 }
 EOF
 )
